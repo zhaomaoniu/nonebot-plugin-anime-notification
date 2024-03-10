@@ -2,5 +2,5 @@ from pydantic import BaseModel
 
 
 class Config(BaseModel):
-    MAL_CLIENT_ID: str
+    mal_client_id: str
     """MyAnimeList API client id"""

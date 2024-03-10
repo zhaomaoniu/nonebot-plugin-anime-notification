@@ -1,19 +1,10 @@
-from nonebot import require
-
-require("nonebot_plugin_localstore")
-
-import nonebot_plugin_localstore as store
-
-# 用户数据结构示例
-# list(
-#     {"user_id": str, "anime_list": list({"anime_detail": AnimeDetail, "group_id": str})}
-# )
-
 from sqlalchemy import Column, Integer, String, ForeignKey
 from sqlalchemy.orm import relationship
 from sqlalchemy.ext.declarative import declarative_base
 
+
 Base = declarative_base()
+AnimeSummaryBase = declarative_base()
 
 
 class User(Base):
@@ -21,6 +12,16 @@ class User(Base):
 
     user_id = Column(String, primary_key=True)
     anime_list = relationship("AnimeGroup", back_populates="user")
+
+
+class AnimeSummaryData(AnimeSummaryBase):
+    __tablename__ = "anime_summary"
+
+    id = Column(Integer, primary_key=True)
+    data = Column(String)  # Store as JSON string
+    pagging = Column(String)  # Store as JSON string
+    season = Column(String)  # Store as JSON string
+    last_update = Column(Integer)  # Store as timestamp
 
 
 class AnimeDetailData(Base):
@@ -54,4 +55,4 @@ class AnimeGroup(Base):
     group_id = Column(String)
 
     user = relationship("User", back_populates="anime_list")
-    anime = relationship("AnimeDetail", back_populates="groups")
+    anime = relationship("AnimeDetailData", back_populates="groups")
