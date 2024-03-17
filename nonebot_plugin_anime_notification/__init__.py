@@ -77,7 +77,7 @@ def get_time_info(dt: datetime):
     return {"year": year, "season": season}
 
 
-def build_anime_info_message(anime_detail: AnimeDetailData) -> UniMessage:
+async def build_anime_info_message(anime_detail: AnimeDetailData) -> UniMessage:
     main_picture = json.loads(anime_detail.main_picture)
     alternative_titles = json.loads(anime_detail.alternative_titles)
     start_season = json.loads(anime_detail.start_season)
@@ -87,7 +87,7 @@ def build_anime_info_message(anime_detail: AnimeDetailData) -> UniMessage:
 
     msg = UniMessage()
 
-    msg += Image(url=main_picture["large"])
+    msg += Image(raw=await fetch_url(main_picture["large"]))
     msg += f"{alternative_titles.get('ja') or alternative_titles.get('en') or alternative_titles['synonyms'][0]}\n"
     msg += f"共 {anime_detail.num_episodes} 集, {status_map[anime_detail.status]}\n"
     msg += f"开始放送时间: {anime_detail.start_date}, 是 {start_season['year']} 年 {season_cn_map[start_season['season']]}季番\n" if start_season["year"] != "unknown" else "开始放送时间: 未知\n"
@@ -338,7 +338,7 @@ async def handle_search(bot: Bot, event: Event, arg: Message = CommandArg()):
                 logger.error(f"获取番剧信息失败: {e.__class__.__name__}: {e}")
                 await search_anime.finish("获取番剧信息失败，请检查番剧ID是否正确")
 
-        await build_anime_info_message(anime_detail).send(
+        await (await build_anime_info_message(anime_detail)).send(
             UniMessage.get_target(event, bot), bot, at_sender=event.get_user_id()
         )
 
@@ -409,7 +409,7 @@ async def handle_subscribe(bot: Bot, event: Event, arg: Message = CommandArg()):
                 "user_id": anime_group.user_id,
             }
         )
-        await ("订阅成功！\n" + build_anime_info_message(anime_detail)).send(
+        await ("订阅成功！\n" + (await build_anime_info_message(anime_detail))).send(
             target, bot, at_sender=event.get_user_id()
         )
 

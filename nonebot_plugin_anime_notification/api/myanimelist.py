@@ -28,21 +28,26 @@ class MyAnimeList:
             "statistics",
         ]
 
-    async def get_client(self) -> aiohttp.ClientSession:
-        return aiohttp.ClientSession(headers=self._headers)
-
     async def get_seasonal_anime(self, year: int, season: str) -> AnimeData:
-        async with (await self.get_client()).get(
-            f"{self._base_url}/anime/season/{year}/{season}?limit=500",
-        ) as response:
-            if response.status != 200:
-                raise Exception(f"Failed to get seasonal anime: {await response.text()}")
-            return await response.json()
+        async with aiohttp.ClientSession(headers=self._headers) as session:
+            async with session.get(
+                f"{self._base_url}/anime/season/{year}/{season}?limit=500",
+            ) as response:
+                if response.status != 200:
+                    raise Exception(
+                        f"Failed to get seasonal anime: {await response.text()}"
+                    )
+                result = await response.json()
+        return result
 
     async def get_anime_detail(self, anime_id: int) -> AnimeDetail:
-        async with (await self.get_client()).get(
-            f"{self._base_url}/anime/{anime_id}?fields=" + ",".join(self._fields),
-        ) as response:
-            if response.status != 200:
-                raise Exception(f"Failed to get anime detail: {await response.text()}")
-            return await response.json()
+        async with aiohttp.ClientSession(headers=self._headers) as session:
+            async with session.get(
+                f"{self._base_url}/anime/{anime_id}?fields=" + ",".join(self._fields),
+            ) as response:
+                if response.status != 200:
+                    raise Exception(
+                        f"Failed to get anime detail: {await response.text()}"
+                    )
+                result = await response.json()
+        return result
