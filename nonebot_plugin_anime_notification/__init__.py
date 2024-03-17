@@ -1,8 +1,7 @@
 import json
-import asyncio
 import nonebot
+from typing import List
 from pathlib import Path
-from typing import List, Dict
 from nonebot.log import logger
 from nonebot.params import CommandArg
 from datetime import datetime, timedelta
@@ -11,25 +10,27 @@ from nonebot import require, get_driver, on_command
 
 require("nonebot_plugin_alconna")
 require("nonebot_plugin_localstore")
+require("nonebot_plugin_apscheduler")
 
 import nonebot_plugin_localstore as store
-from nonebot_plugin_alconna import UniMessage, Image
+from nonebot_plugin_alconna import UniMessage, Image, Text
+from nonebot_plugin_apscheduler import scheduler
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from .config import Config
-from .api import MyAnimeList
-from .utils import fuzzy_match
+from .utils import fetch_url
+from .api import MyAnimeList, Jikan
+from .models.myanimelist import Season, AnimeData
 from .maps import media_type_map, status_map, source_map, season_cn_map
-from .models.myanimelist import Data, Season, AnimeData, AlternativeTitles
 from .data_source import (
     User,
-    AnimeSummaryData,
-    AnimeDetailData,
-    AnimeGroup,
     Base,
+    AnimeGroup,
+    AnimeDetailData,
     AnimeSummaryBase,
+    AnimeSummaryData,
 )
 
 
@@ -45,19 +46,18 @@ anime_summary_data_file: Path = store.get_data_file(
 )
 
 
-engine = create_engine(f"sqlite:///{data_file.resolve()}", echo=True)
+engine = create_engine(f"sqlite:///{data_file.resolve()}")
 Base.metadata.create_all(engine)
 Session = sessionmaker(bind=engine)
 session = Session()
 
-anime_summary_engine = create_engine(
-    f"sqlite:///{anime_summary_data_file.resolve()}", echo=True
-)
+anime_summary_engine = create_engine(f"sqlite:///{anime_summary_data_file.resolve()}")
 AnimeSummaryBase.metadata.create_all(anime_summary_engine)
 AnimeSummarySession = sessionmaker(bind=anime_summary_engine)
 anime_summary_session = AnimeSummarySession()
 
 mal_api = MyAnimeList(config.mal_client_id)
+jikan_api = Jikan()
 
 season_map = {0: "winter", 1: "spring", 2: "summer", 3: "fall"}
 season_index_map = {v: k for k, v in season_map.items()}
@@ -79,11 +79,13 @@ def build_anime_info_message(anime_detail: AnimeDetailData) -> UniMessage:
     msg = UniMessage()
 
     msg += Image(url=main_picture["large"])
-    msg += f"{alternative_titles['jp'] or alternative_titles['en'] or alternative_titles['synonyms'][0]}\n"
+    msg += f"{alternative_titles.get('ja') or alternative_titles.get('en') or alternative_titles['synonyms'][0]}\n"
     msg += f"共 {anime_detail.num_episodes} 集, {status_map[anime_detail.status]}\n"
-    msg += f"开始放送时间: {anime_detail.start_date}, 是 {start_season['year']} 年 {season_cn_map[start_season['season']]} 季番\n"
+    msg += f"开始放送时间: {anime_detail.start_date}, 是 {start_season['year']} 年 {season_cn_map[start_season['season']]}季番\n"
     msg += f"类型: {source_map[anime_detail.source]} {media_type_map[anime_detail.media_type]}\n"
-    msg += f"每集平均时长: {anime_detail.average_episode_duration / 60} 分钟\n"
+    msg += (
+        f"每集平均时长: {round(anime_detail.average_episode_duration / 60, 2)} 分钟\n"
+    )
     msg += f"制作公司: {', '.join([studio['name'] for studio in studios])}\n"
     msg += f"观看详情: {statistics['status']['watching']} 正在观看, {statistics['status']['completed']} 已观看, {statistics['status']['on_hold']} 暂时搁置, {statistics['status']['dropped']} 弃坑, {statistics['status']['plan_to_watch']} 计划观看\n"
     msg += f"共 {statistics['num_list_users']} 人观看"
@@ -94,29 +96,48 @@ async def is_group(event: Event, bot: Bot) -> bool:
     return not UniMessage.get_target(event, bot).private
 
 
-async def get_animes_by_title(title: str):
-    # 读取数据库
-    # 把已有番剧数据都读取出来
-    anime_detail_data_list = session.query(AnimeDetailData).all()
-
-    # 建立 id 到 alternative_titles 的映射
-    id_to_alternative_titles: Dict[int, List[str]] = {}
-    for anime_detail_data in anime_detail_data_list:
-        alternative_titles: AlternativeTitles = json.loads(
-            anime_detail_data.alternative_titles
-        )
-        id_to_alternative_titles[anime_detail_data.id] = []
-        for title in alternative_titles.values():
-            if isinstance(title, str):
-                id_to_alternative_titles[anime_detail_data.id].append(title)
-            elif isinstance(title, list):
-                id_to_alternative_titles[anime_detail_data.id].extend(title)
-
-    # 模糊匹配
-    return fuzzy_match(title, id_to_alternative_titles, 3)
+async def get_animes_by_title(title: str) -> List[int]:
+    animes = await jikan_api.get_anime_search(title, limit=3)
+    return [
+        {
+            "id": anime["mal_id"],
+            "title": anime["title_japanese"],
+            "image": await fetch_url(anime["images"]["jpg"]["large_image_url"]),
+        }
+        for anime in animes["data"]
+    ]
 
 
-@get_driver().on_startup
+async def commit_anime_detail_data(
+    anime_id: int, anime_detail_dict: dict
+) -> AnimeDetailData:
+    if (
+        anime_detail := session.query(AnimeDetailData).filter_by(id=anime_id).first()
+    ) is not None:
+        return anime_detail
+
+    anime_detail = AnimeDetailData(
+        id=anime_id,
+        title=anime_detail_dict["title"],
+        main_picture=json.dumps(anime_detail_dict["main_picture"]),
+        alternative_titles=json.dumps(anime_detail_dict["alternative_titles"]),
+        start_date=anime_detail_dict["start_date"],
+        synopsis=anime_detail_dict["synopsis"],
+        media_type=anime_detail_dict["media_type"],
+        status=anime_detail_dict["status"],
+        num_episodes=anime_detail_dict["num_episodes"],
+        start_season=json.dumps(anime_detail_dict["start_season"]),
+        source=anime_detail_dict["source"],
+        average_episode_duration=anime_detail_dict["average_episode_duration"],
+        background=anime_detail_dict["background"],
+        studios=json.dumps(anime_detail_dict["studios"]),
+        statistics=json.dumps(anime_detail_dict["statistics"]),
+    )
+    session.add(anime_detail)
+    session.commit()
+    return anime_detail
+
+
 async def fetch_anime():
     # 读取数据库，如果没有往后三个季度的数据就爬取数据
     anime_data = anime_summary_session.query(AnimeSummaryData).all()
@@ -161,7 +182,10 @@ async def fetch_anime():
         season = season_map[(season_index_map[season] + 1) % 4]
 
     logger.info("正在爬取番剧数据")
-    anime_data_list: List[AnimeData] = [await func for func in tasks] # await asyncio.gather(*tasks)
+    anime_data_list: List[AnimeData] = [
+        await func for func in tasks
+    ]  # await asyncio.gather(*tasks)
+    # gather 爬取会 timeout
 
     # 将获取到的番剧信息存入数据库
     for anime_data in anime_data_list:
@@ -185,68 +209,19 @@ async def fetch_anime():
             anime_summary_session.add(anime)
     anime_summary_session.commit()
 
-    # 判断是否有番剧详情数据，如果没有就爬取
-    anime_detail_data_list = session.query(AnimeDetailData).all()
-    anime_detail_id_list = [
-        anime_detail_data.id for anime_detail_data in anime_detail_data_list
-    ]
 
-    # 进行数据扁平化
-    anime_summary_list: List[Data] = []
-    for anime_data in anime_data_list:
-        anime_summary_list.extend(anime_data["data"])
-    anime_summary_id_list = [
-        anime_summary["node"]["id"] for anime_summary in anime_summary_list
-    ]
+# 如果数据库为空，爬取番剧数据
+if (
+    anime_summary_session.query(AnimeSummaryData).first() is None
+    or len(anime_summary_session.query(AnimeSummaryData).all()) == 0
+):
+    get_driver().on_startup(fetch_anime)
 
-    anime_id_list: List[str] = list(
-        set(anime_summary_id_list) - set(anime_detail_id_list)
-    )
+# 每天 0 点更新番剧数据
+scheduler.add_job(fetch_anime, "cron", hour=0, minute=0, second=0)
 
-    if len(anime_id_list) == 0:
-        logger.info("番剧详情数据已为最新")
-        return None
-
-    # gather 获取近三个季度番剧详情
-    tasks = []
-    for anime_id in anime_id_list:
-        tasks.append(mal_api.get_anime_detail(anime_id))
-    logger.info("正在爬取番剧详情数据")
-    anime_detail_data_list = [await func for func in tasks] # await asyncio.gather(*tasks)
-
-    # 将获取到的番剧详情存入数据库
-    for anime_detail_data in anime_detail_data_list:
-        # 确保ID唯一
-        anime = (
-            session.query(AnimeDetailData).filter_by(id=anime_detail_data["id"]).first()
-        )
-        if anime is not None:
-            continue
-
-        anime = AnimeDetailData(
-            id=anime_detail_data["id"],
-            title=anime_detail_data["title"],
-            main_picture=json.dumps(anime_detail_data["main_picture"]),
-            alternative_titles=json.dumps(anime_detail_data["alternative_titles"]),
-            start_date=anime_detail_data["start_date"],
-            synopsis=anime_detail_data["synopsis"],
-            media_type=anime_detail_data["media_type"],
-            status=anime_detail_data["status"],
-            num_episodes=anime_detail_data["num_episodes"],
-            start_season=json.dumps(anime_detail_data["start_season"]),
-            source=anime_detail_data["source"],
-            average_episode_duration=anime_detail_data["average_episode_duration"],
-            background=anime_detail_data["background"],
-            studios=json.dumps(anime_detail_data["studios"]),
-            statistics=json.dumps(anime_detail_data["statistics"]),
-        )
-        session.add(anime)
-
-    session.commit()
-
-
-search_anime = on_command("搜索番剧")
-subscribe = on_command("订阅番剧", rule=is_group)
+search_anime = on_command("搜索番剧", aliases={"番剧搜索"})
+subscribe = on_command("订阅番剧", aliases={"番剧订阅"}, rule=is_group)
 
 
 @search_anime.handle()
@@ -260,19 +235,28 @@ async def handle_search(bot: Bot, event: Event, arg: Message = CommandArg()):
         if len(animes) == 0:
             await search_anime.finish("没有找到相关番剧，换换关键词试试吧")
         else:
-            msg = "找到以下番剧, 使用`搜索番剧 [番剧ID]`来获取详细信息吧：\n"
+            msg = Text("找到以下番剧, 使用`搜索番剧 [番剧ID]`来获取详细信息吧：\n")
             for anime in animes:
-                msg += f"{anime['id']}: {anime['match']}\n"
-            await search_anime.finish(msg)
+                msg += Text(f"\nNo. {anime['id']}: {anime['title']}\n")
+                msg += Image(raw=anime["image"])
+            await search_anime.finish(await UniMessage(msg).export(bot))
     else:
         anime_id = int(str_arg)
         anime_detail = session.query(AnimeDetailData).filter_by(id=anime_id).first()
         if anime_detail is None:
-            await search_anime.finish("没有找到相关番剧，请检查番剧ID是否正确")
-        else:
-            await build_anime_info_message(anime_detail).send(
-                UniMessage.get_target(event, bot), bot, at_sender=True
-            )
+            # 写入新番剧数据
+            try:
+                anime_detail_dict = await mal_api.get_anime_detail(anime_id)
+                anime_detail = await commit_anime_detail_data(
+                    anime_id, anime_detail_dict
+                )
+            except Exception as e:
+                logger.error(f"获取番剧信息失败: {e.__class__.__name__}: {e}")
+                await search_anime.finish("获取番剧信息失败，请检查番剧ID是否正确")
+
+        await build_anime_info_message(anime_detail).send(
+            UniMessage.get_target(event, bot), bot, at_sender=event.get_user_id()
+        )
 
 
 @subscribe.handle()
@@ -286,31 +270,40 @@ async def handle_subscribe(bot: Bot, event: Event, arg: Message = CommandArg()):
         if len(animes) == 0:
             await subscribe.finish("没有找到相关番剧，换换关键词试试吧")
         else:
-            msg = "找到以下番剧，请再次使用`订阅番剧 [番剧ID]`：\n"
+            msg = Text("找到以下番剧, 使用`搜索番剧 [番剧ID]`来获取详细信息吧：\n")
             for anime in animes:
-                msg += f"{anime['id']}: {anime['match']}\n"
-            await subscribe.finish(msg)
+                msg += Text(f"\nNo. {anime['id']}: {anime['title']}\n")
+                msg += Image(raw=anime["image"])
+            await subscribe.finish(await UniMessage(msg).export(bot))
     else:
         anime_id = int(str_arg)
         anime_detail = session.query(AnimeDetailData).filter_by(id=anime_id).first()
         if anime_detail is None:
-            await subscribe.finish("没有找到相关番剧，请检查番剧ID是否正确")
-        else:
-            target = UniMessage.get_target(event, bot)
-            user = session.query(User).filter_by(user_id=event.get_user_id()).first()
+            # 写入新番剧数据
+            try:
+                anime_detail_dict = await mal_api.get_anime_detail(anime_id)
+                anime_detail = await commit_anime_detail_data(
+                    anime_id, anime_detail_dict
+                )
+            except Exception as e:
+                logger.error(f"获取番剧信息失败: {e.__class__.__name__}: {e}")
+                await subscribe.finish("获取番剧信息失败，请检查番剧ID是否正确")
 
-            if user is None:
-                user = User(user_id=event.get_user_id())
-                session.add(user)
-                session.commit()
+        target = UniMessage.get_target(event, bot)
+        user = session.query(User).filter_by(user_id=event.get_user_id()).first()
 
-            anime_group = AnimeGroup(
-                user_id=user.user_id,
-                anime_id=anime_detail.id,
-                group_id=target.id or target.parent_id,
-            )
-            session.add(anime_group)
+        if user is None:
+            user = User(user_id=event.get_user_id())
+            session.add(user)
             session.commit()
-            await ("订阅成功！\n" + build_anime_info_message(anime_detail)).send(
-                target, bot, at_sender=True
-            )
+
+        anime_group = AnimeGroup(
+            user_id=user.user_id,
+            anime_id=anime_detail.id,
+            group_id=target.id or target.parent_id,
+        )
+        session.add(anime_group)
+        session.commit()
+        await ("订阅成功！\n" + build_anime_info_message(anime_detail)).send(
+            target, bot, at_sender=event.get_user_id()
+        )

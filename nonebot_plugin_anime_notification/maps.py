@@ -29,6 +29,7 @@ source_map = {
     "picture_book": "绘本",
     "radio": "广播",
     "music": "音乐",
+    "mixed_media": "混合媒体",
 }
 
 season_cn_map = {
