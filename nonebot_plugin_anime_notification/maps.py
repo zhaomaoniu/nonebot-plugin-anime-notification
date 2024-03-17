@@ -38,3 +38,25 @@ season_cn_map = {
     "summer": "夏",
     "fall": "秋",
 }
+
+
+day_of_the_week_map = {
+    "monday": "周一",
+    "tuesday": "周二",
+    "wednesday": "周三",
+    "thursday": "周四",
+    "friday": "周五",
+    "saturday": "周六",
+    "sunday": "周日",
+    "unknown": "未知",
+}
+
+day_of_the_week_num_map = {
+    "monday": 0,
+    "tuesday": 1,
+    "wednesday": 2,
+    "thursday": 3,
+    "friday": 4,
+    "saturday": 5,
+    "sunday": 6,
+}

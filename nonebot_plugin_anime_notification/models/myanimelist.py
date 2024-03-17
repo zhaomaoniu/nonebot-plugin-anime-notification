@@ -54,6 +54,11 @@ class Statistics(TypedDict):
     num_list_users: int
 
 
+class Broadcast(TypedDict):
+    day_of_the_week: str
+    start_time: str
+
+
 class AnimeData(TypedDict):
     data: List[Data]
     paging: Paging
@@ -66,7 +71,9 @@ class AnimeDetail(TypedDict):
     main_picture: Picture
     alternative_titles: AlternativeTitles
     start_date: str
+    end_date: str
     synopsis: str
+    broadcast: Broadcast
     media_type: str
     status: str
     num_episodes: int

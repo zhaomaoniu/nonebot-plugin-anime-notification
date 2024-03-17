@@ -32,7 +32,9 @@ class AnimeDetailData(Base):
     main_picture = Column(String)  # Store as JSON string
     alternative_titles = Column(String)  # Store as JSON string
     start_date = Column(String)
+    end_date = Column(String)
     synopsis = Column(String)
+    broadcast = Column(String)  # Store as JSON string
     media_type = Column(String)
     status = Column(String)
     num_episodes = Column(Integer)
@@ -50,7 +52,7 @@ class AnimeGroup(Base):
     __tablename__ = "anime_groups"
 
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.user_id"))
+    user_id = Column(String, ForeignKey("users.user_id"))
     anime_id = Column(Integer, ForeignKey("anime_details.id"))
     group_id = Column(String)
 
